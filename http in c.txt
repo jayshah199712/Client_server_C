@@ -1,0 +1,303 @@
+A message has a header part and a message body separated by a blank line. The blank line is ALWAYS needed even if there is no message body. The header starts with a command and has additional lines of key value pairs separated by a colon and a space. If there is a message body, it can be anything you want it to be.
+
+Lines in the header and the blank line at the end of the header must end with a carraige return and linefeed pair (see HTTP header line break style) so that's why those lines have \r\n at the end.
+
+A URL has the form of http://host:port/path?query_string
+
+There are two main ways of submitting a request to a website:
+
+GET: The query string is optional but, if specified, must be reasonably short. Because of this the header could just be the GET command and nothing else. A sample message could be:
+GET /path?query_string HTTP/1.0\r\n
+\r\n
+POST: What would normally be in the query string is in the body of the message instead. Because of this the header needs to include the Content-Type: and Content-Length: attributes as well as the POST command. A sample message could be:
+POST /path HTTP/1.0\r\n
+Content-Type: text/plain\r\n
+Content-Length: 12\r\n
+\r\n
+query_string
+So, to answer your question: if the URL you are interested in POSTing to is http://api.somesite.com/apikey=ARG1&command=ARG2 then there is no body or query string and, consequently, no reason to POST because there is nothing to put in the body of the message and so nothing to put in the Content-Type: and Content-Length:
+
+I guess you could POST if you really wanted to. In that case your message would look like:
+
+POST /apikey=ARG1&command=ARG2 HTTP/1.0\r\n
+\r\n
+So to send the message the C program needs to:
+
+create a socket
+lookup the IP address
+open the socket
+send the request
+wait for the response
+close the socket
+The send and receive calls won't necessarily send/receive ALL the data you give them - they will return the number of bytes actually sent/received. It is up to you to call them in a loop and send/receive the remainder of the message.
+
+What I did not do in this sample is any sort of real error checking - when something fails I just exit the program. Let me know if it works for you:
+
+
+
+
+
+#include <stdio.h> /* printf, sprintf */
+#include <stdlib.h> /* exit */
+#include <unistd.h> /* read, write, close */
+#include <string.h> /* memcpy, memset */
+#include <sys/socket.h> /* socket, connect */
+#include <netinet/in.h> /* struct sockaddr_in, struct sockaddr */
+#include <netdb.h> /* struct hostent, gethostbyname */
+
+void error(const char *msg) { perror(msg); exit(0); }
+
+int main(int argc,char *argv[])
+{
+    /* first what are we going to send and where are we going to send it? */
+    int portno =        80;
+    char *host =        "api.somesite.com";
+    char *message_fmt = "POST /apikey=%s&command=%s HTTP/1.0\r\n\r\n";
+
+    struct hostent *server;
+    struct sockaddr_in serv_addr;
+    int sockfd, bytes, sent, received, total;
+    char message[1024],response[4096];
+
+    if (argc < 3) { puts("Parameters: <apikey> <command>"); exit(0); }
+
+    /* fill in the parameters */
+    sprintf(message,message_fmt,argv[1],argv[2]);
+    printf("Request:\n%s\n",message);
+
+    /* create the socket */
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) error("ERROR opening socket");
+
+    /* lookup the ip address */
+    server = gethostbyname(host);
+    if (server == NULL) error("ERROR, no such host");
+
+    /* fill in the structure */
+    memset(&serv_addr,0,sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(portno);
+    memcpy(&serv_addr.sin_addr.s_addr,server->h_addr,server->h_length);
+
+    /* connect the socket */
+    if (connect(sockfd,(struct sockaddr *)&serv_addr,sizeof(serv_addr)) < 0)
+        error("ERROR connecting");
+
+    /* send the request */
+    total = strlen(message);
+    sent = 0;
+    do {
+        bytes = write(sockfd,message+sent,total-sent);
+        if (bytes < 0)
+            error("ERROR writing message to socket");
+        if (bytes == 0)
+            break;
+        sent+=bytes;
+    } while (sent < total);
+
+    /* receive the response */
+    memset(response,0,sizeof(response));
+    total = sizeof(response)-1;
+    received = 0;
+    do {
+        bytes = read(sockfd,response+received,total-received);
+        if (bytes < 0)
+            error("ERROR reading response from socket");
+        if (bytes == 0)
+            break;
+        received+=bytes;
+    } while (received < total);
+
+    if (received == total)
+        error("ERROR storing complete response from socket");
+
+    /* close the socket */
+    close(sockfd);
+
+    /* process response */
+    printf("Response:\n%s\n",response);
+
+    return 0;
+}
+
+
+
+
+
+
+
+Like the other answer pointed out, 4096 bytes is not a very big response. I picked that number at random assuming that the response to your request would be short. If it can be big you have two choices:
+
+read the Content-Length: header from the response and then dynamically allocate enough memory to hold the whole response.
+write the response to a file as the pieces arrive
+Additional information to answer the question asked in the comments:
+
+What if you want to POST data in the body of the message? Then you do need to include the Content-Type: and Content-Length: headers. The Content-Length: is the actual length of everything after the blank line that separates the header from the body.
+
+Here is a sample that takes the following command line arguments:
+
+host
+port
+command (GET or POST)
+path (not including the query data)
+query data (put into the query string for GET and into the body for POST)
+list of headers (Content-Length: is automatic if using POST)
+So, for the original question you would run:
+
+a.out api.somesite.com 80 GET "/apikey=ARG1&command=ARG2"
+And for the question asked in the comments you would run:
+
+a.out api.somesite.com 80 POST / "name=ARG1&value=ARG2" "Content-Type: application/x-www-form-urlencoded"
+Here is the code:
+
+
+
+
+
+
+
+
+#include <stdio.h> /* printf, sprintf */
+#include <stdlib.h> /* exit, atoi, malloc, free */
+#include <unistd.h> /* read, write, close */
+#include <string.h> /* memcpy, memset */
+#include <sys/socket.h> /* socket, connect */
+#include <netinet/in.h> /* struct sockaddr_in, struct sockaddr */
+#include <netdb.h> /* struct hostent, gethostbyname */
+
+void error(const char *msg) { perror(msg); exit(0); }
+
+int main(int argc,char *argv[])
+{
+    int i;
+
+    /* first where are we going to send it? */
+    int portno = atoi(argv[2])>0?atoi(argv[2]):80;
+    char *host = strlen(argv[1])>0?argv[1]:"localhost";
+
+    struct hostent *server;
+    struct sockaddr_in serv_addr;
+    int sockfd, bytes, sent, received, total, message_size;
+    char *message, response[4096];
+
+    if (argc < 5) { puts("Parameters: <host> <port> <method> <path> [<data> [<headers>]]"); exit(0); }
+
+    /* How big is the message? */
+    message_size=0;
+    if(!strcmp(argv[3],"GET"))
+    {
+        message_size+=strlen("%s %s%s%s HTTP/1.0\r\n");        /* method         */
+        message_size+=strlen(argv[3]);                         /* path           */
+        message_size+=strlen(argv[4]);                         /* headers        */
+        if(argc>5)
+            message_size+=strlen(argv[5]);                     /* query string   */
+        for(i=6;i<argc;i++)                                    /* headers        */
+            message_size+=strlen(argv[i])+strlen("\r\n");
+        message_size+=strlen("\r\n");                          /* blank line     */
+    }
+    else
+    {
+        message_size+=strlen("%s %s HTTP/1.0\r\n");
+        message_size+=strlen(argv[3]);                         /* method         */
+        message_size+=strlen(argv[4]);                         /* path           */
+        for(i=6;i<argc;i++)                                    /* headers        */
+            message_size+=strlen(argv[i])+strlen("\r\n");
+        if(argc>5)
+            message_size+=strlen("Content-Length: %d\r\n")+10; /* content length */
+        message_size+=strlen("\r\n");                          /* blank line     */
+        if(argc>5)
+            message_size+=strlen(argv[5]);                     /* body           */
+    }
+
+    /* allocate space for the message */
+    message=malloc(message_size);
+
+    /* fill in the parameters */
+    if(!strcmp(argv[3],"GET"))
+    {
+        if(argc>5)
+            sprintf(message,"%s %s%s%s HTTP/1.0\r\n",
+                strlen(argv[3])>0?argv[3]:"GET",               /* method         */
+                strlen(argv[4])>0?argv[4]:"/",                 /* path           */
+                strlen(argv[5])>0?"?":"",                      /* ?              */
+                strlen(argv[5])>0?argv[5]:"");                 /* query string   */
+        else
+            sprintf(message,"%s %s HTTP/1.0\r\n",
+                strlen(argv[3])>0?argv[3]:"GET",               /* method         */
+                strlen(argv[4])>0?argv[4]:"/");                /* path           */
+        for(i=6;i<argc;i++)                                    /* headers        */
+            {strcat(message,argv[i]);strcat(message,"\r\n");}
+        strcat(message,"\r\n");                                /* blank line     */
+    }
+    else
+    {
+        sprintf(message,"%s %s HTTP/1.0\r\n",
+            strlen(argv[3])>0?argv[3]:"POST",                  /* method         */
+            strlen(argv[4])>0?argv[4]:"/");                    /* path           */
+        for(i=6;i<argc;i++)                                    /* headers        */
+            {strcat(message,argv[i]);strcat(message,"\r\n");}
+        if(argc>5)
+            sprintf(message+strlen(message),"Content-Length: %d\r\n",strlen(argv[5]));
+        strcat(message,"\r\n");                                /* blank line     */
+        if(argc>5)
+            strcat(message,argv[5]);                           /* body           */
+    }
+
+    /* What are we going to send? */
+    printf("Request:\n%s\n",message);
+
+    /* create the socket */
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) error("ERROR opening socket");
+
+    /* lookup the ip address */
+    server = gethostbyname(host);
+    if (server == NULL) error("ERROR, no such host");
+
+    /* fill in the structure */
+    memset(&serv_addr,0,sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(portno);
+    memcpy(&serv_addr.sin_addr.s_addr,server->h_addr,server->h_length);
+
+    /* connect the socket */
+    if (connect(sockfd,(struct sockaddr *)&serv_addr,sizeof(serv_addr)) < 0)
+        error("ERROR connecting");
+
+    /* send the request */
+    total = strlen(message);
+    sent = 0;
+    do {
+        bytes = write(sockfd,message+sent,total-sent);
+        if (bytes < 0)
+            error("ERROR writing message to socket");
+        if (bytes == 0)
+            break;
+        sent+=bytes;
+    } while (sent < total);
+
+    /* receive the response */
+    memset(response,0,sizeof(response));
+    total = sizeof(response)-1;
+    received = 0;
+    do {
+        bytes = read(sockfd,response+received,total-received);
+        if (bytes < 0)
+            error("ERROR reading response from socket");
+        if (bytes == 0)
+            break;
+        received+=bytes;
+    } while (received < total);
+
+    if (received == total)
+        error("ERROR storing complete response from socket");
+
+    /* close the socket */
+    close(sockfd);
+
+    /* process response */
+    printf("Response:\n%s\n",response);
+
+    free(message);
+    return 0;
+}
